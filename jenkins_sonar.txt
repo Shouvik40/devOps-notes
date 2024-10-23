@@ -2,14 +2,15 @@ pipeline {
     agent any
 
     environment {
-        // Environment variables
         GIT_REPO = 'https://github.com/yourusername/your-repo.git' // Update with your repository
         IMAGE_NAME = 'your-image-name' // Docker image name
+        AWS_REGION = 'your-aws-region' // AWS region
+        ECR_REPO = 'your-ecr-repo' // ECR repository name (if using ECR)
         EKS_CLUSTER = 'your-eks-cluster' // EKS cluster name
-        DEPLOYMENT_NAME = 'your-deployment-name' // Kubernetes deployment name
+        HELM_CHART_PATH = 'path/to/your/helm/chart' // Path to Helm chart
         SONARQUBE_SERVER = 'http://your-sonarqube-server' // SonarQube server URL
         SONARQUBE_CREDENTIALS = 'sonarqube-credentials-id' // Jenkins credentials ID for SonarQube
-        AWS_REGION = 'your-aws-region' // AWS region
+        MAVEN_CREDENTIALS = 'maven-credentials-id' // Jenkins credentials ID for Maven (if needed)
         DOCKER_CREDENTIALS = 'docker-credentials-id' // Jenkins credentials ID for Docker
     }
 
@@ -20,25 +21,20 @@ pipeline {
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Maven Build') {
             steps {
                 script {
-                    // Log in to Docker
-                    docker.withRegistry('https://index.docker.io/v1/', "${DOCKER_CREDENTIALS}") {
-                        // Build and push the Docker image
-                        def app = docker.build("${IMAGE_NAME}:${env.BUILD_ID}")
-                        app.push()
-                    }
+                    // Run Maven build
+                    sh 'mvn clean package'
                 }
             }
         }
 
-        stage('Run Unit Tests') {
+        stage('Run JUnit Tests') {
             steps {
                 script {
-                    // Run your unit tests
-                    sh 'npm install' // Update for your language/framework
-                    sh 'npm test'    // Run tests, update command as necessary
+                    // Run JUnit tests
+                    sh 'mvn test'
                 }
             }
         }
@@ -61,16 +57,37 @@ pipeline {
             }
         }
 
+        stage('Dockerize and Push Image') {
+            steps {
+                script {
+                    // Log in to Docker
+                    docker.withRegistry('https://index.docker.io/v1/', "${DOCKER_CREDENTIALS}") {
+                        // Build and push the Docker image
+                        def app = docker.build("${IMAGE_NAME}:${env.BUILD_ID}")
+                        app.push()
+                    }
+
+                    // Optionally, push to ECR
+                    sh """
+                    aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    docker tag ${IMAGE_NAME}:${env.BUILD_ID} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${env.BUILD_ID}
+                    docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${env.BUILD_ID}
+                    """
+                }
+            }
+        }
+
         stage('Deploy to EKS') {
             steps {
                 script {
                     // Configure kubectl for EKS
                     sh "aws eks update-kubeconfig --name ${EKS_CLUSTER} --region ${AWS_REGION}"
-                    
-                    // Deploy the Docker image to EKS
+
+                    // Deploy using Helm
                     sh """
-                    kubectl set image deployment/${DEPLOYMENT_NAME} ${DEPLOYMENT_NAME}=${IMAGE_NAME}:${env.BUILD_ID} --record
-                    kubectl rollout status deployment/${DEPLOYMENT_NAME}
+                    helm upgrade --install ${EKS_CLUSTER} ${HELM_CHART_PATH} \
+                      --set image.repository=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO} \
+                      --set image.tag=${env.BUILD_ID}
                     """
                 }
             }
