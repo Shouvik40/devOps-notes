@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: complex-nginx-deployment
+  labels:
+    app: nginx
+    tier: frontend
+    environment: production
+spec:
+  replicas: 3  # Number of pods to start with
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      nodeSelector:  # Assign to specific node types
+        disktype: ssd
+      affinity:  # Specify affinity/anti-affinity rules
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/e2e-az-name
+                operator: In
+                values:
+                - e2e-az1
+                - e2e-az2
+      containers:
+      - name: nginx
+        image: nginx:1.21.1
+        imagePullPolicy: Always  # Always pull the latest image
+        ports:
+        - containerPort: 80
+        resources:  # Resource requests and limits
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:  # Mounting volumes
+        - name: config-volume
+          mountPath: /etc/nginx/conf.d
+        env:  # Environment variables
+        - name: ENVIRONMENT
+          value: production
+        - name: CONFIG_FILE
+          value: "/etc/nginx/conf.d/default.conf"
+        livenessProbe:  # Liveness probe
+          httpGet:
+            path: /healthz
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 5
+        readinessProbe:  # Readiness probe
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+        lifecycle:  # Hooks for container lifecycle
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "nginx -s quit"]
+      - name: sidecar-container
+        image: busybox
+        command: ["sh", "-c", "while true; do echo Hello; sleep 3600; done"]
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+      initContainers:  # Init containers for setup tasks
+      - name: init-myservice
+        image: busybox
+        command: ['sh', '-c', 'echo Init container is running...']
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+      volumes:  # Volumes for persistent data/config
+      - name: config-volume
+        configMap:
+          name: nginx-config
+      tolerations:  # Tolerate specific node taints
+      - key: "key1"
+        operator: "Equal"
+        value: "value1"
+        effect: "NoExecute"
+        tolerationSeconds: 600
+      terminationGracePeriodSeconds: 30  # Grace period before killing a pod
+      securityContext:  # Security context for the pod
+        fsGroup: 2000
+        runAsUser: 1000
+        runAsGroup: 3000
+      dnsPolicy: ClusterFirst  # DNS settings
+      restartPolicy: Always  # Restart policy for containers
+
+  strategy:  # Deployment strategy
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%  # At most 25% of pods can be unavailable during an update
+      maxSurge: 1  # Only 1 pod will be created above the desired number during update
+  revisionHistoryLimit: 10  # Retain the history of 10 previous versions
+  minReadySeconds: 5  # Time before the new pod is considered available
+  progressDeadlineSeconds: 600  # Time to wait for deployment to be successful
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+data:
+  default.conf: |
+    server {
+      listen 80;
+      location / {
+        root /usr/share/nginx/html;
+        index index.html index.htm;
+      }
+      location /healthz {
+        access_log off;
+        return 200 'OK';
+      }
+    }

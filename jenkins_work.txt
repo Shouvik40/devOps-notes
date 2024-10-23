@@ -1,0 +1,105 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = 'gg-api'
+        EC2_USER = 'ubuntu'
+        SSH_KEY_PATH = "/var/lib/jenkins/workspace/key.pem"
+        BUILD_TAG = "${DOCKER_IMAGE}:${BUILD_NUMBER}"  // Use BUILD_NUMBER to tag the Docker image
+        AWS_REGION = 'ap-south-1' // Change this to your AWS region
+    }
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()  // This will clean up the workspace before each build starts
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                // Checkout the code from GitHub
+                git branch: 'main', url: 'https://github.com/Shouvik40/hello-world-api.git'
+            }
+        }
+
+        stage('Clean Up') {
+            steps {
+                script {
+                    // Clean up unused Docker images and containers to free up space
+                    sh "docker system prune -af"
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    // Build and tag the Docker image with the build number
+                    sh "pwd"
+                    sh "docker build -t ${BUILD_TAG} ."
+                    sh "docker save -o ${DOCKER_IMAGE}_${BUILD_NUMBER}.tar ${BUILD_TAG}"
+                    sh "pwd"
+                }
+            }
+        }
+
+        stage('Select and Deploy to EC2') {
+            steps {
+                script {
+                    // Declare local variable for EC2 IP
+                    def ec2Ip
+
+                    // Use AWS CLI to find an instance with the specified tags
+                    def instanceId = sh(script: """
+                        aws ec2 describe-instances --filters \
+                        "Name=tag:Environment,Values=Test" \
+                        "Name=tag:Role,Values=AppServer" \
+                        --query 'Reservations[*].Instances[*].InstanceId' \
+                        --output text --region ${AWS_REGION}
+                    """, returnStdout: true).trim()
+
+                    // If instanceId is empty, fail the build
+                    if (instanceId == '') {
+                        error 'No EC2 instance found with the specified tags.'
+                    } else {
+                        echo "Selected EC2 Instance ID: ${instanceId}"
+                        
+                        // Get the public IP of the selected instance
+                        ec2Ip = sh(script: """
+                            aws ec2 describe-instances --instance-ids ${instanceId} \
+                            --query 'Reservations[*].Instances[*].PublicIpAddress' \
+                            --output text --region ${AWS_REGION}
+                        """, returnStdout: true).trim()
+
+                        if (ec2Ip == '') {
+                            error 'Could not retrieve public IP address for the selected instance.'
+                        } else {
+                            echo "Deploying to EC2 instance with IP: ${ec2Ip}"
+
+                            // Copy the Docker image to the EC2 instance
+                            sh """
+                                scp -o StrictHostKeyChecking=no -i ${SSH_KEY_PATH} \
+                                /var/lib/jenkins/workspace/hello-world-pipeline/${DOCKER_IMAGE}_${BUILD_NUMBER}.tar \
+                                ${EC2_USER}@${ec2Ip}:/home/${EC2_USER}/
+                            """
+
+                            // Load and run the Docker image directly via ssh
+                            sh """
+                            ssh -i ${SSH_KEY_PATH} ${EC2_USER}@${ec2Ip} \
+                            'container_ids=\$(docker ps -aq --filter name=${DOCKER_IMAGE}_${BUILD_NUMBER}); \
+                            if [ -n "\$container_ids" ]; then \
+                                docker rm -f \$container_ids; \
+                            fi; \
+                            docker rmi ${BUILD_TAG} || true; \
+                            docker load -i /home/${EC2_USER}/${DOCKER_IMAGE}_${BUILD_NUMBER}.tar; \
+                            docker run -d -p 3000:3000 --name ${DOCKER_IMAGE}_${BUILD_NUMBER} ${BUILD_TAG}'
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

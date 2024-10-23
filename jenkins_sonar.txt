@@ -1,0 +1,88 @@
+pipeline {
+    agent any
+
+    environment {
+        // Environment variables
+        GIT_REPO = 'https://github.com/yourusername/your-repo.git' // Update with your repository
+        IMAGE_NAME = 'your-image-name' // Docker image name
+        EKS_CLUSTER = 'your-eks-cluster' // EKS cluster name
+        DEPLOYMENT_NAME = 'your-deployment-name' // Kubernetes deployment name
+        SONARQUBE_SERVER = 'http://your-sonarqube-server' // SonarQube server URL
+        SONARQUBE_CREDENTIALS = 'sonarqube-credentials-id' // Jenkins credentials ID for SonarQube
+        AWS_REGION = 'your-aws-region' // AWS region
+        DOCKER_CREDENTIALS = 'docker-credentials-id' // Jenkins credentials ID for Docker
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: "${GIT_REPO}"
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    // Log in to Docker
+                    docker.withRegistry('https://index.docker.io/v1/', "${DOCKER_CREDENTIALS}") {
+                        // Build and push the Docker image
+                        def app = docker.build("${IMAGE_NAME}:${env.BUILD_ID}")
+                        app.push()
+                    }
+                }
+            }
+        }
+
+        stage('Run Unit Tests') {
+            steps {
+                script {
+                    // Run your unit tests
+                    sh 'npm install' // Update for your language/framework
+                    sh 'npm test'    // Run tests, update command as necessary
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    // SonarQube analysis
+                    withCredentials([usernamePassword(credentialsId: "${SONARQUBE_CREDENTIALS}", usernameVariable: 'SONAR_USER', passwordVariable: 'SONAR_PASSWORD')]) {
+                        sh """
+                        sonar-scanner \
+                          -Dsonar.projectKey=${IMAGE_NAME} \
+                          -Dsonar.sources=. \
+                          -Dsonar.host.url=${SONARQUBE_SERVER} \
+                          -Dsonar.login=${SONAR_USER} \
+                          -Dsonar.password=${SONAR_PASSWORD}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                script {
+                    // Configure kubectl for EKS
+                    sh "aws eks update-kubeconfig --name ${EKS_CLUSTER} --region ${AWS_REGION}"
+                    
+                    // Deploy the Docker image to EKS
+                    sh """
+                    kubectl set image deployment/${DEPLOYMENT_NAME} ${DEPLOYMENT_NAME}=${IMAGE_NAME}:${env.BUILD_ID} --record
+                    kubectl rollout status deployment/${DEPLOYMENT_NAME}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully.'
+        }
+        failure {
+            echo 'Pipeline failed.'
+        }
+    }
+}
